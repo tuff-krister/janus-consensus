@@ -1,4 +1,4 @@
-//  Agent that implements a consensus protocol.
+//  Agent that implements our proposed consensus protocol.
 //  Copyright (C) 2022 Emil Wengle
 
 //  This program is free software: you can redistribute it and/or modify
@@ -40,9 +40,6 @@ class ConsensusAgentWUW extends UnetAgent {
     static final int APP_TYPE_NEW_ROUND = 1 // Used to request new round
     static final int APP_TYPE_CHANNEL = 2
 
-    // Constants: fallback reference power
-    static final int FALLBACK_PLVL = 185
-
     // Constant: shift amount, ID
     static final int ID_LSB = 26
 
@@ -57,19 +54,23 @@ class ConsensusAgentWUW extends UnetAgent {
     static final int DELAY_LSB = 13
     static final int RESERVED_LSB = 20
 
-    // Constant: confidence bits
+    // Constant: confidence bits (not actively used)
     static final int CONF_WIDTH = 3
 
     // Constants: subclasses of type PROPOSAL
     static final int OPINION = 0 // Send opinion with this
     static final int CONVERGED = 1 // Send notification of convergence
+
+    // Constants: used to determine whether we should send the final opinion
+    // when we enter the done state, and whether we should log the final
+    // opinion
     static final int START_OVER = 2 // Start over regardless of state
     static final int NEXT_ROUND = 3 // Start over only in ``done'' state
 
     // Constant: USER channel
     static final int USER = 4
 
-    // Constants: shift amounts for disagreements in OFDM
+    // Constants: indexes for a helper variable
     static final int NOISE = 0
     static final int DOPPLER = 1
     static final int DELAY = 2
@@ -78,8 +79,12 @@ class ConsensusAgentWUW extends UnetAgent {
     static final int TIMEOUT = 5000
     static final int ACK_DELAY = 1000
 
+    // Constant: how many times we can back off before giving up on sending
+    // a packet
     static final int MAX_SEND_TRIES = 8
 
+    // Mappings and lists for least significant bits, used to assemble and
+    // parse ADBs
     static final List<String> KEY_IDX = new ArrayList<String>()
     static final Map<String, Integer> PARAM_LSB = new TreeMap<String, Integer>()
     static final Map<String, Integer> WIDTH_LSB = new TreeMap<String, Integer>()
@@ -106,41 +111,42 @@ class ConsensusAgentWUW extends UnetAgent {
 
     static final String title = "Consensus OFDM agent, WUWNet edition"
     static final String description = ("Agent that estimates channel"
-    //    + " from an optimisation problem with constraints on delay and "
-    //    + "Doppler spreads.")
         + "properties and comes to a consensus with other agents in the "
         + "network, based on some constraints.")
     
-    // Memory
-    int timeMultiplier = 1
-    int badOFDMs
-    int timesTXd
-    int reason
+    // Memory variables
+    int timeMultiplier = 1 // Used to extend the listening timer
+    int badOFDMs // Tracks lost OFDM packets (not tested)
+    int timesTXd // Tracks transmissions since last visit in adapt state
+    int reason // Why are we initiating a new round?
     boolean opinionLocked // Ignore new opinions in done state after half time
-    volatile int sessionID
-    boolean hasReported
+    volatile int sessionID // Used to tell different rounds apart
+    boolean hasReported // Prevent duplicate reports in the same round
 
     // Design parameters
     int ofdmTime = 60000 // Millis
     int minimumListenTime = TIMEOUT // Millis
     int meanExp = ACK_DELAY // Millis, random addition with Exp distro
-    float averagingStep = 1.0 // 0.5
-    boolean jitter = true
+    float averagingStep = 1.0 // How much of the next opinion should be
+    // the compromise
+    boolean jitter = true // Use perturbation step as in section 3.1; is
+    // ignored in "fine-tuning" mode
 
     // Statistics
-    int timesAdapted
-    long startTime
-    long stopTime
-    int txesThisRound
-    int collisionAll // All-time
-    int collision // This round
-    int badJanusAll // All-time
-    int badJanus // This round
-    int rxAll // All-time
-    int rx // This round
-    // Below variable can be used to enable "finishing touches" mode
+    int timesAdapted // Visits to the adapt state
+    long startTime // When we started this round
+    long stopTime // When we stopped this round
+    int txesThisRound // Times transmitted this round
+    int collisionAll // Packet collisions all-time
+    int collision // Packet collisions this round
+    int badJanusAll // Lost JANUS packets all-time
+    int badJanus // Lost JANUS packets this round
+    int rxAll // JANUS packets received all-time
+    int rx // JANUS packets received this round
+    // Below variable enables "fine-tuning" mode when nonzero
     volatile int timesGoneBack // Times heard different opinion after consensus
 
+    // Parameters that should be changeable on the fly
     enum DesignParams implements Parameter {
         averagingStep,
         jitter,
@@ -158,7 +164,8 @@ class ConsensusAgentWUW extends UnetAgent {
     ConsensusAgentWUW(int ofdmTime) {
         setOfdmTime(ofdmTime)
     }
-    
+
+    // Also for compatibility with startup script.
     ConsensusAgentWUW(int ofdmTime, int minimumListenTime, int meanExp) {
         setOfdmTime(ofdmTime)
         setMinimumListenTime(minimumListenTime)
@@ -190,10 +197,15 @@ class ConsensusAgentWUW extends UnetAgent {
     }
 
     long getTime() {
-        phy.time
+        try {
+            phy.time
+        } catch (NullPointerException e) {
+            log.warning "Time was null. Process time cannot be found."
+            -1L
+        }
     }
 
-    // Get max missed packets
+    // Get max missed packets in a row; default is two (third one restarts)
     int getMaxRetries() {
         def uwlink = agentForService(Services.LINK)
         uwlink.maxRetries ?: 2
@@ -215,7 +227,7 @@ class ConsensusAgentWUW extends UnetAgent {
      */
     Map<String, Number> channelOpinion = new TreeMap<String, Number>()
     /**
-     * Holds this node's confidence in its opinion on parameters.
+     * Holds this node's confidence in its opinion on parameters. Not tested.
      */
     Map<String, Integer> channelConfidence = new TreeMap<String, Integer>()
     /**
@@ -223,18 +235,23 @@ class ConsensusAgentWUW extends UnetAgent {
      */
     FSMBehavior behaviour
 
+    // Convenient access to the physical agent
     AgentID phy
     
     @Override
     void startup() {
         // Lets us receive notifications about RX'd frames
         subscribeForService(Services.PHYSICAL)
-        // Make sure we get the cargo right
+        // Make sure we start with a made-up opinion
+        // Future work would ensure that these are better anchored in reality
         makeUpOpinion()
+        // Convenient access to the physical layer
         phy = agentForService(Services.PHYSICAL)
-        phy[Physical.JANUS].powerLevel = -20 // Just for testing
+        // Only works with a model that finds packet loss from TX power
+        phy[Physical.JANUS].powerLevel = -20
         // Insert a finite state machine behaviour here
         behaviour = add new FSMBehavior()
+        // The beginning of the listen state
         behaviour.add new FSMBehavior.State(S_GO) {
             @Override
             void onEnter() {
@@ -244,6 +261,7 @@ class ConsensusAgentWUW extends UnetAgent {
                 timeMultiplier = 1
             }
         }
+        // The end of the listen state
         behaviour.add new FSMBehavior.State(S_DONELISTEN, {
             // Here we can forget that we reported anything
             log.fine "_STATE_ Entering $S_DONELISTEN"
@@ -265,6 +283,7 @@ class ConsensusAgentWUW extends UnetAgent {
                 behaviour.nextState = S_ADAPT
             }
         })
+        // Message state
         behaviour.add new FSMBehavior.State(S_MESSAGE, {
             log.fine "_STATE_ Entering $S_MESSAGE"
             // Send our opinion, then proceed to listen
@@ -274,14 +293,13 @@ class ConsensusAgentWUW extends UnetAgent {
             // Extra time to account for resetting the timer
             timeMultiplier = 3
         })
+        // Adapt state
         behaviour.add new FSMBehavior.State(S_ADAPT, {
             log.fine "_STATE_ Entering $S_ADAPT"
             timesAdapted++
             // Adapt our opinion towards a ``centre of mass''
             if (makeCompromise()) {
-                // If we land on CoM, proceed to done
-                // Send our CoM one last time, then we are done
-                // sendFinalOpinion()
+                // All opinions were equal, so we reached local consensus
                 log.fine("No change from moving to ``centre of mass''. "
                 + "Broadcasting one last time")
                 setOFDMParams()
@@ -294,7 +312,7 @@ class ConsensusAgentWUW extends UnetAgent {
                 behaviour.nextState = S_MESSAGE
             }
         })
-        // We are done here and should be speaking OFDM
+        // Done state: we are done here and should be speaking OFDM
         // However, hearing an opinion that we did not agree on can pull
         // the agent into the consensus loop again
         behaviour.add new FSMBehavior.State(S_DONE) {
@@ -308,38 +326,36 @@ class ConsensusAgentWUW extends UnetAgent {
                 hasReported = false
             }
         }
+        // Exiting the done state to start a new round
         behaviour.add new FSMBehavior.State(S_RESTART, {
-            // Reset everything
             // Reset acknowledgement and lost OFDM packets
             log.fine "_STATE_ Entering $S_RESTART"
+            // Make sure that we report
             if (reason == NEXT_ROUND) {
-            //  def tdelta = stopTime - startTime
-            //  send trace(null, new EndOfConsensusNtf(
-            //      stepsTaken: timesAdapted, roundNumber: sessionID,
-            //      channelProps: channelOpinion, timeMillis: tdelta/1000)) 
                 ensureReport()
             }
+            // Next session, and reset stats that we just reported
             sessionID++
             opinionLocked = false
             sendNewRound()
             badOFDMs = 0
-            // FOCUS on the consensus stage
             timesTXd = 0
             resetStats()
             timesGoneBack = 0
             otherNodes.clear()
             makeUpOpinion()
-         // send new StartConsensusReq(recipient: getAgentID())
             behaviour.nextState = S_GO
             startTime = getTime()
-            // TODO add check of overheard opinion
         })
         behaviour.setInitialState S_GO
     }
 
+    // Ensures that we have printed statistics and the final opinion.
     void ensureReport() {
-        if (hasReported) return // We just need to make sure we reported
+        // Do not report the same round more than once
+        if (hasReported) return 
         def tdelta = stopTime - startTime
+        // Not used at this time
         send trace(null, new EndOfConsensusNtf(
             stepsTaken: timesAdapted, roundNumber: sessionID,
             channelProps: channelOpinion, timeMillis: tdelta/1000)) 
@@ -354,9 +370,12 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         hasReported = true
     }
 
+    // Sets the listening timer.
     def setListenTimer(int millis) {
         final def currentPacks = otherNodes.size()
         add new WakerBehavior(millis, {
+            // No-op unless we did not hear any new nodes since this timer
+            // was set
             if (otherNodes.size() == currentPacks
                 && behaviour.getCurrentState() == S_GO) {
                 behaviour.nextState = S_DONELISTEN
@@ -368,6 +387,7 @@ Missed $badJanus of ${badJanus + rx} packets;"""
     def setOFDMParams() {
         log.fine "_TRACE_ Setting OFDM"
         try {
+            // OFDM parameter selection is future work
             phy[USER].modulation = "ofdm"
         } catch (FjageException e) {
             log.warning("Failed to set modulation to OFDM on "
@@ -383,9 +403,11 @@ Missed $badJanus of ${badJanus + rx} packets;"""
                 opinionLocked = true
                 // Report in
                 ensureReport()
+                // After reporting, we can safely reset our statistics
                 resetStats()
             }
         })
+        // The OFDM timer itself
         add new WakerBehavior(ofdmTime, { 
             if (behaviour.getCurrentState() == S_DONE
                     && session == sessionID
@@ -400,24 +422,26 @@ Missed $badJanus of ${badJanus + rx} packets;"""
     @Override
     Message processRequest(Message req) {
         log.fine "_TRACE_ Got request: type ${req.getClass().getSimpleName()}"
+        // We got a request; check its type
         if (req instanceof StartConsensusReq) {
+            // Want to start a new consensus process
             if (behaviour.getCurrentState() != S_DONE) {
                 // Cannot start
                 return new RefuseRsp(req,
                     "Agent is already in a consensus process")
             }
             try {
-                // If the darecipient: getAgentID()ta channel does not support OFDM, this will fail
+                // If the data channel does not support OFDM, this will fail
                 phy[USER].modulation = "ofdm"
             } catch (FjageException e) {
-                // log.warning("Modem does not support OFDM. "
-                //     + "The consensus process will be simulated")
+                // Catch block keeps the agent from crashing
             }
             log.info("Starting consensus process")
             behaviour.nextState = S_RESTART
             return new Message(recipient: req.sender, inReplyTo: req,
                 performative: Performative.AGREE)
         } else if (req instanceof CancelConsensusReq) {
+            // Want to abort the consensus process; check if it is sensible
             if (behaviour.getCurrentState() != S_DONE) {
                 behaviour.nextState = S_DONE
                 reason = START_OVER
@@ -435,16 +459,17 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         log.fine "_TRACE_ Generating starting opinion"
         def rng = AgentLocalRandom.current()
 
+        // Randomly select any permitted value
         channelOpinion["doppler"] = (float)rng.nextInt(64)/2.0F
         channelOpinion["delay"] = rng.nextInt(128)
         channelOpinion["noise"] = 32 + rng.nextInt(128)
+        // Actually, these are same for all
+        // Kept here for future purposes
         channelConfidence["doppler"] = 1
         channelConfidence["delay"] = 1
         channelConfidence["noise"] = 1
 
-        // log.info "Fabricated a channel estimate"
-        log.fine "Our fabricated channel estimate is " + channelOpinion
-        // log.fine "Our confidence in our opinion is " + channelConfidence
+        log.fine "Our fabricated channel estimate is $channelOpinion"
     }
     @Override
     void processMessage(Message msg) {
@@ -453,9 +478,7 @@ Missed $badJanus of ${badJanus + rx} packets;"""
             // Handle the consensus packet
             switch (msg.appType) {
                 case APP_TYPE_CHANNEL:
-                    // Should still respond to accepts or acknowledgements
-                    // FOCUS on this, because this is what we want to do!
-                    // We got another packet, so we got a response
+                    // Count the response towards received packets
                     rx++
                     processOpinionNtf(msg)
                 break
@@ -472,41 +495,45 @@ Missed $badJanus of ${badJanus + rx} packets;"""
             // Only matters if we are in OFDM state
             if (behaviour.getCurrentState() == S_DONE
                 && msg.type == USER) {
+                // We do not test sending OFDM packets, so this can be ignored
                 badOFDMs = Math.max(badOFDMs - 1, 0)
             }
         } else if (msg instanceof BadFrameNtf) {
             if (msg.type == Physical.JANUS) {
+                // Missed a JANUS packet
                 log.fine "_LOSS_ JANUS packet lost"
                 badJanus++
             } else if (behaviour.getCurrentState() == S_DONE
                 && msg.type == USER) {
-                // Only matters if we are in OFDM state
+                // We do not test sending OFDM packets
                 badOFDMs++
                 if (badOFDMs > getMaxRetries()) {
                     // Restart
-                    // log.info "Lost too many packets. Initiating consensus"
                     send new StartConsensusReq(recipient: getAgentID())
                 }
             }
         } else if (msg instanceof CollisionNtf) {
             if (msg.type == Physical.JANUS) {
+                // Keep track of packet collision
                 log.fine "_LOSS_ JANUS packet collision"
                 collision++
             }
         }
     }
 
+    // Handles a new round packet.
     void processNewRoundNtf(Message msg) {
         def roundNumber = (int) subint(msg.appData, ROUNDNO_LSB, 32)
         def forceBit = subint(msg.appData, FORCE_BIT, 1)
-        // log.info "_CHECK_ Got round number $roundNumber vs sID $sessionID"
         if (forceBit) {
+            // Forcing new round
             send new CancelConsensusReq()
             // Give the agent a chance to abort first
             add new WakerBehavior(1, {
                 send new StartConsensusReq(recipient: getAgentID())
             })
         } else {
+            // Non-forcing new round
             if (behaviour.getCurrentState() == S_DONE
                 && (roundNumber > sessionID // 
                     || roundNumber < 0 && sessionID > 0)) {
@@ -543,8 +570,8 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         sendWhenNotBusy(req, -1)
     }
 
+    // Ensures that we do not transmit while receiving.
     void sendWhenNotBusy(Message req, int attempt) {
-        // TODO make fully JANUS compliant
         def mac = agentForService(Services.MAC)
         if (attempt < MAX_SEND_TRIES) {
             add new WakerBehavior(50*(int)Math.pow(2, attempt), {
@@ -559,9 +586,9 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         }
     }
 
+    // Sends a channel estimate packet.
     void sendOpinion(int perf) {
         log.fine "_TRACE_ Sending opinion of type $perf"
-        // I stopped hard-coding numbers
         def appData = buildADB(perf)
         def req = new TxJanusFrameReq(classUserID: CUID,
             appType: APP_TYPE_CHANNEL, appData: appData) 
@@ -585,7 +612,7 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         log.fine "_TRACE_ Unbuilding ADB ${Long.toHexString(appData)}"
         def rxOpinion = new TreeMap<String, Number>()
         def rxConfidence = new TreeMap<String, Integer>()
-        def from = (int)subint(appData, ID_LSB, 8) // should not be hard-coded!
+        def from = (int)subint(appData, ID_LSB, 8)
         KEY_IDX.each {
             rxOpinion[it] = antiTransform((int)subint(appData, PARAM_LSB[it],
                 WIDTH_LSB[it]), it)
@@ -594,7 +621,7 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         [from, rxOpinion, rxConfidence]
     }
 
-    // Extracts a subset of a long integer.
+    // Extracts a subset of a long integer. Helper function.
     def subint(long num, int lsb, int width) {
         def mask = (long) Math.pow(2, width)-1 << lsb
         (num & mask) >>> lsb
@@ -606,12 +633,15 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         def result = 0
         switch (key) {
             case "noise":
+                // Compensate for the nonzero minimum value
                 result = -32
                 if (quantity < 0) {
                     quantity += phy.refPowerLevel
                 }
             case "delay":
                 result += quantity
+                // Delay and noise have the same width, but they should use
+                // their own width eventually
                 result = (int)Math.min(subint(-1L, 0, WIDTH_LSB["delay"]),
                     Math.max(0, result))
             break
@@ -625,11 +655,12 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         result
     }
 
-    // Inverse transform of variables.
+    // Find the state variable from its formatted representation.
     def antiTransform(int mapped, String key) {
         def result = 0
         switch (key) {
             case "noise":
+                // Offset by definition
                 result = 32
             case "delay":
                 result += mapped
@@ -643,30 +674,29 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         result
     }
 
-    // FOCUS on this part
+    // Processes a channel state message.
     void processOpinionNtf(Message msg) {
         log.fine "_TRACE_ Processing opinion message $msg"
-        // First find type
+        // Find type (which has no meaning actually) and who it is from
         def appData = msg.appData
         def performative = (appData & 3 << PERF_LSB) >> PERF_LSB
         def from = (appData & 255 << ID_LSB) >> ID_LSB
+        // This switch-case statement is actually redundant
         switch (performative) {
             case OPINION:
             case CONVERGED:
-                // Assess the proposal
-                // TODO let the node go back to adaptation state
+                // Register the opinion if we have not locked our state variables
                 if (!opinionLocked) {
                     log.fine "Received opinion from $from. Registering it"
                     registerOpinion(appData)
                 }
-                // The opinion from our peers may be stale next round
                 break
-            // Future behaviour should use a different app type
             default:
                 log.warning "Unknown performative $performative"
         }
     }
 
+    // Registers the opinion from a peer, starting from an ADB.
     def registerOpinion(long appData) {
         log.fine ("_TRACE_ Registering opinion from ADB "
             + "${Long.toHexString(appData)}")
@@ -676,6 +706,7 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         registerOpinion peerID, peerOpinion
         log.fine("Node $peerID proposes ${peerOpinion[0]} with "
             + "confidence ${peerOpinion[1]}")
+        // Fine-tune if we reached local consensus too soon
         if (behaviour.getCurrentState() == S_DONE
                 && peerOpinion[0] != channelOpinion) {
             log.info("Heard a different opinion than consensus. Enabling "
@@ -685,6 +716,7 @@ Missed $badJanus of ${badJanus + rx} packets;"""
                 + " consensus ${channelOpinion}")
             behaviour.nextState = S_GO
         } else if (behaviour.getCurrentState() == S_GO) {
+            // Resets the listen timer
             behaviour.reenterState()
         }
     }
@@ -694,13 +726,15 @@ Missed $badJanus of ${badJanus + rx} packets;"""
             confidence: peerOpinion[1]]
     }
 
+    // Computes the compromise. Also checks and returns whether all received
+    // opinions were equal.
     def makeCompromise() {
         log.fine "_TRACE_ Finding compromise and updating to it"
         def knownNodes = otherNodes.keySet()
         def compromiseOpinion = new TreeMap<String, Number>()
         def compromiseConfidence = new TreeMap<String, Integer>()
         def allConsensus = true
-        // Register all opinions
+        // Handle each state variable sequentially
         KEY_IDX.each { param ->
             def allVotes = new TreeMap<Integer, List>()
             knownNodes.each { nodeID ->
@@ -717,18 +751,14 @@ Missed $badJanus of ${badJanus + rx} packets;"""
             compromiseOpinion[param] = voteResult["opinion"]
             compromiseConfidence[param] = voteResult["confidence"]
         }
-        def pastOpinion = channelOpinion.clone()
         channelOpinion = moveTowards(compromiseOpinion)
-        // TODO how to compound confidence? Later work, this ``stone soup''
-        // Trying more robust approach: are all opinions equal?
-        // Experimenting with forgetting all opinions between runs
-        // How will this affect consensus? Much in our favour!
+        // Forget all opinions to avoid deadlocks
         otherNodes.clear()
         allConsensus
     }
 
+    // Perturbation step as explained in the reference
     def perturb(String param, Number source) {
-        // log.fine "_TRACE_ Perturbing $param"
         def halfWidth = 0.5
         // Different state variables have different step size
         switch (KEY_IDX.indexOf(param)) {
@@ -746,6 +776,7 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         source + rng.nextDouble(-halfWidth, halfWidth)
     }
 
+    // Sets the opinion closer to the compromise it found.
     def moveTowards(Map compromise) {
         def average = new TreeMap<String, Number>()
         compromise.keySet().each {
@@ -757,7 +788,7 @@ Missed $badJanus of ${badJanus + rx} packets;"""
                     com = (int)roundTowards(com, compromise[it], false)
                 break
                 case "doppler":
-                    // Because we are working in half-hertz
+                    // Because we are working in half-hertz in Doppler
                     com = roundTowards(2*com, 2*compromise[it], false)/2.0F
                 break
                 default: 
@@ -765,7 +796,6 @@ Missed $badJanus of ${badJanus + rx} packets;"""
             }
             average[it] = com
         }
-        // log.fine "Our new opinion is $average"
         average
     }
 
@@ -780,9 +810,9 @@ Missed $badJanus of ${badJanus + rx} packets;"""
 
     /**
      * Find the average of all registered opinions on a state variable. 
+     * This step is user defined. Here, it is the local average.
      */
     def makeCompromise(String key, Map allVotes) {
-        // log.fine "_TRACE_ Compromising on $key"
         def tally = new TreeMap<Number, Integer>()
         // Tally up all votes: list is [value, confidence]
         allVotes.each { dontCare, it ->
@@ -790,6 +820,7 @@ Missed $badJanus of ${badJanus + rx} packets;"""
                 // log.fine "Registering ${it[0]}: ${it[1]}"
                 tally[it[0]] += it[1]
             } catch (NullPointerException e) {
+                // Because Groovy does not let you add anything to NULL
                 tally[it[0]] = it[1]
             }
         }
@@ -800,8 +831,8 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         def floorInstead = timesGoneBack
         // Our compromise strategy
         switch (key) {
+            // Example strategy: majority vote.
             case "foo":
-                // weighted majority vote
                 tally.each { val, vote ->
                     if (vote > strongestVote) {
                         choice = val
@@ -809,6 +840,7 @@ Missed $badJanus of ${badJanus + rx} packets;"""
                     }
                 }
             break
+            // Example strategy: local average.
             case "bar":
             case "noise":
             case "delay":
@@ -827,7 +859,7 @@ Missed $badJanus of ${badJanus + rx} packets;"""
                         : choice)
                 if (KEY_IDX.indexOf(key) == DOPPLER) {
                     // Allow half-steps in Doppler -- didn't see this before
-                    // If we have gone back from OFDM mode, take the floor
+                    // If we are fine-tuning, take the floor
                     choice = (floorInstead ? Math.floor(2*perturbedChoice)
                         : Math.round(2*perturbedChoice))/2
                 } else {
@@ -838,10 +870,12 @@ Missed $badJanus of ${badJanus + rx} packets;"""
             default:
                 throw new FjageException("Unknown key $key")
         }
-        strongestVote = Math.min(strongestVote, 16) // prevent overflow
+        // Sixteen is max because we used four bits in an early stage
+        strongestVote = Math.min(strongestVote, 16) 
         [opinion: choice, confidence: strongestVote]
     }
 
+    // Resets most statistics, and accumulates some.
     void resetStats() {
         txesThisRound = 0
         startTime = 0L
@@ -856,6 +890,7 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         // Cannot reset timesGoneBack because we rely on it
     }
 
+    // Helpers for rounding.
     def roundTowards(Number num, Number to, boolean pow2) {
         if (pow2) {
             num < to ? nextPow2(num) : prevPow2(num)
@@ -872,12 +907,14 @@ Missed $badJanus of ${badJanus + rx} packets;"""
         Math.pow(2, Math.ceil(Math.log(x)/Math.log(2)))
     }
 
+    // Report packet loss ratio at the end.
     void shutdown() {
         super.shutdown()
         log.info("_END_ JANUS packets lost: $badJanusAll/${rxAll+badJanusAll} "
             + "(${badJanusAll/(rxAll + badJanusAll) * 100}%)")
     }
 
+    // Expose our parameters to the end user.
     List<Parameter> getParameterList() {
         allOf DesignParams
     }

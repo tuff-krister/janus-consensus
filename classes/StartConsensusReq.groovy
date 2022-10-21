@@ -18,6 +18,7 @@ import org.arl.fjage.Message
 import org.arl.fjage.Performative
 
 class StartConsensusReq extends Message {
+    // Intended use of these is to find a common frequency band.
     int lowFreq
     int highFreq
 

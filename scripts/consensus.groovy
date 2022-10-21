@@ -41,10 +41,10 @@ loadAgentByClass 'rdp',          'org.arl.unet.net.RouteDiscoveryProtocol'
 loadAgentByClass 'statemanager', 'org.arl.unet.state.StateManager'
 loadAgentByClass 'unity',        'org.arl.unet.diversity.Unity'
 
-// Change these parameters to your liking
-def ofdmTime = 300000
-def minimumListen = 10000
-def meanExp = 2000
+// Change these parameters to your liking. The unit is milliseconds.
+def ofdmTime = 120000
+def minimumListen = 3000
+def meanExp = 1000
 loadConsensusAgent ofdmTime, minimumListen, meanExp
 println "Time set to ($ofdmTime, $minimumListen, $meanExp)"
 // loadAgentByClass 'consensus',    'ConsensusAgentWUW'
