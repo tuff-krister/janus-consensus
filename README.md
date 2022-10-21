@@ -2,7 +2,7 @@
 
 This repo contains the source files for the [UnetStack](https://unetstack.net)
 implementation of the JANUS-based consensus protocol that is the core of
-[this paper](https://doi.org/3567600.3568142).
+[this paper](https://doi.org/10.1145/3567600.3568142).
 This branch contains the actively maintained version.
 The `acm-dl` branch contains the code as it appears in the supplementary
 material; please use that one for reproducing any results.
