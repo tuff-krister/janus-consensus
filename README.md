@@ -1,11 +1,11 @@
 # A JANUS-Based Consensus Protocol for Parametric Modulation Schemes
 
 This repo contains the source files for the [UnetStack](https://unetstack.net)
-implementation of my envisioned JANUS-based consensus protocol.
-The consensus agent is the core of the paper with the same name as the
-section header. The GitHub repo contains the up-to-date version of it.
-The ACM_DL branch contains the code as it appears in the supplementary
-material.
+implementation of the JANUS-based consensus protocol that is the core of
+[this paper](https://doi.org/3567600.3568142).
+This branch contains the actively maintained version.
+The `acm-dl` branch contains the code as it appears in the supplementary
+material; please use that one for reproducing any results.
 
 # Simulation considerations
 
