@@ -1,5 +1,5 @@
 //  Agent that implements our proposed consensus protocol.
-//  Copyright (C) 2022 Emil Wengle
+//  Copyright (C) 2023 Emil Wengle
 
 //  This program is free software: you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -36,8 +36,15 @@ import org.arl.unet.phy.TxJanusFrameReq
 class ConsensusAgentWUW extends UnetAgent {
 
     // Constants: JANUS fields
+    /** Class user ID of the protocol. */
     static final int CUID = 66
+    /** Use when a node cannot maintain the consensus process, _e.g._ due to
+     *  low energy.
+     */
+    static final int APP_TYPE_PANIC = 0
+    /** Use when a node requests a new round of consensus. */
     static final int APP_TYPE_NEW_ROUND = 1 // Used to request new round
+    /** Use to indicate that the packet contains channel state variables. */
     static final int APP_TYPE_CHANNEL = 2
 
     // Constant: shift amount, ID
@@ -75,9 +82,10 @@ class ConsensusAgentWUW extends UnetAgent {
     static final int DOPPLER = 1
     static final int DELAY = 2
 
-    // Constants: time to wait for a packet reception in milliseconds
-    static final int TIMEOUT = 5000
-    static final int ACK_DELAY = 1000
+    // Constants: default time to wait for a packet reception in milliseconds
+    static final int OFDM_TIME = 120000
+    static final int TIMEOUT = 3000
+    static final int EXP_DELAY = 3000
 
     // Constant: how many times we can back off before giving up on sending
     // a packet
@@ -110,7 +118,7 @@ class ConsensusAgentWUW extends UnetAgent {
     static final String S_RESTART = "report"
 
     static final String title = "Consensus OFDM agent, WUWNet edition"
-    static final String description = ("Agent that estimates channel"
+    static final String description = ("Agent that estimates channel "
         + "properties and comes to a consensus with other agents in the "
         + "network, based on some constraints.")
     
@@ -124,9 +132,9 @@ class ConsensusAgentWUW extends UnetAgent {
     boolean hasReported // Prevent duplicate reports in the same round
 
     // Design parameters
-    int ofdmTime = 60000 // Millis
+    int ofdmTime = OFDM_TIME // Millis, also used as time from done to new round
     int minimumListenTime = TIMEOUT // Millis
-    int meanExp = ACK_DELAY // Millis, random addition with Exp distro
+    int meanExp = EXP_DELAY // Millis, random addition with Exp distro
     float averagingStep = 1.0 // How much of the next opinion should be
     // the compromise
     boolean jitter = true // Use perturbation step as in section 3.1; is
@@ -172,6 +180,7 @@ class ConsensusAgentWUW extends UnetAgent {
         setMeanExp(meanExp)
     }
 
+    // Sanity check attempts to set OFDM timer
     void setOfdmTime(int ofdmTime) {
         if (ofdmTime < 0) {
             log.warning "Set ofdmTime to $ofdmTime failed; can't be negative"
@@ -180,22 +189,26 @@ class ConsensusAgentWUW extends UnetAgent {
         }
     }
 
+    // Sanity check attempts to set minimum listen time
     void setMinimumListenTime(int minimumListenTime) {
         if (minimumListenTime < 0) {
-            log.warning "Tried to set minimumListenTime to illegal value $minimumListenTime"
+            log.warning ("Set minimumListenTime to $minimumListenTime failed;"
+            + " can't be negative")
         } else {
             this.minimumListenTime = minimumListenTime
         }
     }
 
+    // Sanity check attempts to set mean of exponentially distributed addition
     void setMeanExp(int meanExp) {
         if (meanExp <= 0) {
-            log.warning "Tried to set meanExp to illegal value $meanExp"
+            log.warning "Set meanExp to $meanExp failed; must be positive"
         } else {
             this.meanExp = meanExp
         }
     }
 
+    // Get timestamp, with exception handling
     long getTime() {
         try {
             phy.time
@@ -247,9 +260,16 @@ class ConsensusAgentWUW extends UnetAgent {
         makeUpOpinion()
         // Convenient access to the physical layer
         phy = agentForService(Services.PHYSICAL)
+        // We use bits 33 downto 26 in the ADB, so we cannot schedule
+        if (phy[Physical.JANUS].frameLength != 8) {
+            log.severe "The consensus agent does not support cargo. Aborting"
+            stop()
+            return
+        }
         // Only works with a model that finds packet loss from TX power
-        phy[Physical.JANUS].powerLevel = -20
+        // phy[Physical.JANUS].powerLevel = -42
         // Insert a finite state machine behaviour here
+        // TODO delay startup until one node gets a start consensus message
         behaviour = add new FSMBehavior()
         // The beginning of the listen state
         behaviour.add new FSMBehavior.State(S_GO) {
@@ -347,6 +367,7 @@ class ConsensusAgentWUW extends UnetAgent {
             behaviour.nextState = S_GO
             startTime = getTime()
         })
+
         behaviour.setInitialState S_GO
     }
 
@@ -477,6 +498,8 @@ Missed $badJanus of ${badJanus + rx} packets;"""
             && msg.classUserID == CUID) {
             // Handle the consensus packet
             switch (msg.appType) {
+                case APP_TYPE_PANIC:
+                    processPanicNtf(msg)
                 case APP_TYPE_CHANNEL:
                     // Count the response towards received packets
                     rx++
@@ -519,6 +542,17 @@ Missed $badJanus of ${badJanus + rx} packets;"""
                 collision++
             }
         }
+    }
+
+    // Handles a distress packet.
+    void processPanicNtf(Message msg) {
+        def appData = msg.appData
+        def who = subint(appData, ID_LSB, 8)
+        // Future work: field in the ADB that gives a reason for distress,
+        // _e.g.,_ low battery, or agent failure
+        log.warning("_DOWN_ Node $who has trouble maintaining the consensus "
+        + "process, and might have turned off. Discarding it")
+        otherNodes.remove(who)
     }
 
     // Handles a new round packet.
