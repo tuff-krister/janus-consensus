@@ -42,13 +42,15 @@ loadAgentByClass 'statemanager', 'org.arl.unet.state.StateManager'
 loadAgentByClass 'unity',        'org.arl.unet.diversity.Unity'
 
 // Change these parameters to your liking. The unit is milliseconds.
-def ofdmTime = 120000
+def ofdmTime = 120000 // Time in the done state
 def minimumListen = 3000
-def meanExp = 1000
-loadConsensusAgent ofdmTime, minimumListen, meanExp
+def meanExp = 3000 // Expected value of random addition to listen time
+// loadConsensusAgent ofdmTime, minimumListen, meanExp
 println "Time set to ($ofdmTime, $minimumListen, $meanExp)"
 // loadAgentByClass 'consensus',    'ConsensusAgentWUW'
 
+container.add 'cpoller', new ConsensusPoller(checkRandomly: false,
+    checkInterval: 60000, cycleInterval: 14400000)
 container.add 'remote', new org.arl.unet.remote.RemoteControl(cwd: new File(home, 'scripts'), enable: false)
 container.add 'bbmon',  new org.arl.unet.bb.BasebandSignalMonitor(new File(home, 'logs/signals-0.txt').path, 64)
 

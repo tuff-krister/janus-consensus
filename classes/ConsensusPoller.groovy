@@ -32,18 +32,24 @@ class ConsensusPoller extends UnetAgent {
     int thisCycle
 
     boolean checkRandomly
-    int checkInterval
-    int cycleInterval
+    int cycleZeroInMillis = 3600*1000
+    int checkInterval = 60*1000
+    int cycleInterval = 14400*1000
+
+    final String name = "Consensus overwatch"
+    final String description = ("Agent that ensures that there is a consensus"
+        + " agent up and running on this node.")
 
     enum Params implements Parameter {
         checkRandomly,
+        cycleZeroInMillis,
         checkInterval,
         cycleInterval,
     }
 
     @Override
     void startup() {
-        add new WakerBehavior(1000, {
+        add new WakerBehavior(cycleZeroInMillis, {
             pollConsensus()
             log.info "_CYCLE_ Starting cycle 0"
             if (checkRandomly) {
@@ -57,7 +63,7 @@ class ConsensusPoller extends UnetAgent {
             }
         })
         // offset them a little to reduce likelihood of concurrent modification
-        add new WakerBehavior(1001, {
+        add new WakerBehavior(cycleZeroInMillis + 1, {
             add new TickerBehavior(cycleInterval, {
                 nextCycle()
             })
