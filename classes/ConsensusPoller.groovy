@@ -21,15 +21,21 @@ import org.arl.fjage.TickerBehavior
 import org.arl.fjage.WakerBehavior
 import org.arl.fjage.param.Parameter
 import org.arl.unet.UnetAgent
+import org.arl.unet.Services
+import org.arl.unet.phy.Physical
 
 class ConsensusPoller extends UnetAgent {
     static final String CONSENSUS_AGENT_ID = "consensus"
+    static final String NOISE_LOGGER_ID = "noiser"
 
     static int ofdmTime = ConsensusAgentWUW.OFDM_TIME
     static int minimumListenTime = ConsensusAgentWUW.TIMEOUT
     static int meanExp = ConsensusAgentWUW.EXP_DELAY
     
     int thisCycle
+
+    List plvls = [-10, -13, -16, -20, -24, -30]
+    def phy
 
     boolean checkRandomly
     int cycleZeroInMillis = 3600*1000
@@ -49,9 +55,12 @@ class ConsensusPoller extends UnetAgent {
 
     @Override
     void startup() {
+        phy = agentForService(Services.PHYSICAL)
         add new WakerBehavior(cycleZeroInMillis, {
+            container.add NOISE_LOGGER_ID, new NoiseLogger()
             pollConsensus()
             log.info "_CYCLE_ Starting cycle 0"
+            phy[Physical.JANUS].powerLevel = plvls[thisCycle % plvls.size()]
             if (checkRandomly) {
                 add new PoissonBehavior(checkInterval, {
                     pollConsensus()
@@ -80,6 +89,7 @@ class ConsensusPoller extends UnetAgent {
         }
         ++thisCycle
         log.info "_CYCLE_ Starting cycle $thisCycle"
+        phy[Physical.JANUS].powerLevel = plvls[thisCycle % plvls.size()]
         // let the polling method handle the relaunch
     }
 

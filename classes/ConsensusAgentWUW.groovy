@@ -308,7 +308,7 @@ class ConsensusAgentWUW extends UnetAgent {
             log.fine "_STATE_ Entering $S_MESSAGE"
             // Send our opinion, then proceed to listen
             sendOpinion()
-            log.fine "Opinion sent. Going back to listening mode"
+            log.fine "Opinion $channelOpinion sent. Going back to listening mode"
             behaviour.nextState = S_GO
             // Extra time to account for resetting the timer
             timeMultiplier = 3
@@ -376,10 +376,10 @@ class ConsensusAgentWUW extends UnetAgent {
         // Do not report the same round more than once
         if (hasReported) return 
         def tdelta = stopTime - startTime
-        // Not used at this time
-        send trace(null, new EndOfConsensusNtf(
-            stepsTaken: timesAdapted, roundNumber: sessionID,
-            channelProps: channelOpinion, timeMillis: tdelta/1000)) 
+        // Not used at this time, so why even bother?
+        // send trace(null, new EndOfConsensusNtf(
+        //     stepsTaken: timesAdapted, roundNumber: sessionID,
+        //     channelProps: channelOpinion, timeMillis: tdelta/1000)) 
         log.info """_RES_ End of consensus round $sessionID
 Reached consensus in $timesAdapted round(s)
 Landed on $channelOpinion
@@ -536,15 +536,13 @@ Missed $badJanus of ${badJanus + rx} packets;"""
                 }
             }
         } else if (msg instanceof CollisionNtf) {
-            if (msg.type == Physical.JANUS) {
-                // Keep track of packet collision
-                log.fine "_LOSS_ JANUS packet collision"
-                collision++
-            }
+            // Keep track of packet collision
+            log.fine "_COLLIDE_ Packet collision registered"
+            collision++
         }
     }
 
-    // Handles a distress packet.
+    // Handles a distress packet. Not actively sent.
     void processPanicNtf(Message msg) {
         def appData = msg.appData
         def who = subint(appData, ID_LSB, 8)
